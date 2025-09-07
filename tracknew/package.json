@@ -1,0 +1,32 @@
+{
+  "name": "code_blocks_archive",
+  "version": "1.0.0",
+  "description": "",
+  "main": "config.js",
+  "scripts": {
+    "test": "mocha",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "abort-controller": "^3.0.0",
+    "agentkeepalive": "^4.3.0",
+    "async": "^3.2.4",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.0.3",
+    "fs": "^0.0.1-security",
+    "httpntlm": "^1.6.1",
+    "httpreq": "^0.5.2",
+    "https-proxy-agent": "^5.0.1",
+    "node-fetch": "^2.6.11",
+    "path": "^0.12.7",
+    "tunnel": "^0.0.6",
+    "xml2js": "^0.5.0"
+  },
+  "devDependencies": {
+    "chai": "^4.3.7",
+    "mocha": "^10.4.0"
+  }
+}
