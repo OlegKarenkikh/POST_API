@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Трекинг отправлений Почты России</title>
+    <style>
+        /* ... (CSS без изменений) ... */
+        /* Добавим стиль для скрытой по умолчанию таблицы */
+        #batch-table-container { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Трекинг отправлений Почты России</h1>
+        <!-- Login/Password Inputs -->
+        <div class="form-group"> <label for="login">Логин API:</label> <input type="text" id="login" placeholder="Логин"> </div>
+        <div class="form-group"> <label for="password">Пароль API:</label> <input type="password" id="password" placeholder="Пароль"> </div>
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab active" data-tab="single">Единичное</div>
+            <div class="tab" data-tab="batch">Пакетное</div>
+            <div class="tab" data-tab="logs">Логи</div>
+        </div>
+
+        <!-- Single Tracking Tab -->
+        <div class="tab-content active" id="single-tab">
+            <h2>Единичное отслеживание</h2>
+            <div class="form-group"> <label for="single-barcode">Трек-номер:</label> <input type="text" id="single-barcode" placeholder="Трек-номер"> </div>
+            <button id="track-single-btn">Отследить</button>
+            <button id="download-single-csv" class="download-btn" style="display: none;">Скачать CSV</button>
+            <div id="single-message" class="message"></div>
+            <div id="single-result" class="result" style="display: none;">
+                 <div id="single-filters"></div>
+                 <div id="single-data"></div>
+            </div>
+        </div>
+
+        <!-- Batch Tracking Tab -->
+        <div class="tab-content" id="batch-tab">
+            <h2>Пакетное отслеживание</h2>
+            <div class="form-group">
+                <label for="batch-file">Файл (.txt, .csv):</label>
+                <input type="file" id="batch-file" accept=".txt,.csv">
+                <button type="button" id="clear-file-btn" class="secondary" style="margin-left: 5px;">Очистить файл</button>
+                <small>Трек-номера по одному в строке.</small>
+            </div>
+            <div class="form-group"> <label for="batch-codes">Или введите трек-номера:</label> <textarea id="batch-codes" rows="6" placeholder="Один трек-номер в строке"></textarea> </div>
+            <button id="track-batch-btn">Отследить пакет</button>
+            <div id="batch-message" class="message"></div>
+            <div id="batch-info" class="batch-info"></div>
+            <div class="progress-container" id="progress-container"> <div class="progress-bar"> <div id="progress" class="progress">0%</div> </div> </div>
+            <div id="batch-result" class="result" style="display: none;">
+                <!-- Содержимое будет генерироваться JS -->
+                <div id="batch-summary"></div>
+                <div id="batch-actions" style="margin-bottom: 15px;"></div>
+                <div id="batch-filters"></div>
+                <div id="batch-table-container"> <!-- Контейнер для таблицы -->
+                    <div id="batch-data"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs Tab -->
+        <div class="tab-content" id="logs-tab">
+             <h2>Логи Приложения</h2>
+             <div class="form-group"> <button id="refresh-logs">Обновить</button> <button id="clear-logs">Очистить</button> </div>
+             <div id="log-message" class="message"></div> <div id="log-view" class="log-view">Загрузка логов...</div>
+        </div>
+    </div>
+
+    <script>
+        // --- Constants & DOM Elements ---
+        const POLLING_INTERVAL_MS = 7000;
+        const MAX_POLLING_ATTEMPTS = 15;
+        const tabs = document.querySelectorAll('.tab');
+        const tabContents = document.querySelectorAll('.tab-content');
+        const loginInput = document.getElementById('login');
+        const passwordInput = document.getElementById('password');
+        // Single
+        const singleBarcode = document.getElementById('single-barcode');
+        const trackSingleBtn = document.getElementById('track-single-btn');
+        const singleResultDiv = document.getElementById('single-result');
+        const singleDataDiv = document.getElementById('single-data');
+        const singleMessage = document.getElementById('single-message');
+        const downloadSingleCsvBtn = document.getElementById('download-single-csv');
+        const singleFiltersDiv = document.getElementById('single-filters'); // Added
+        // Batch
+        const batchFile = document.getElementById('batch-file');
+        const batchCodes = document.getElementById('batch-codes');
+        const trackBatchBtn = document.getElementById('track-batch-btn');
+        const batchResultDiv = document.getElementById('batch-result');
+        const batchInfoDiv = document.getElementById('batch-info');
+        const batchDataDiv = document.getElementById('batch-data'); // Where table goes
+        const batchMessage = document.getElementById('batch-message');
+        const progressContainer = document.getElementById('progress-container');
+        const progressBar = document.getElementById('progress');
+        const clearFileBtn = document.getElementById('clear-file-btn');
+        const batchFiltersDiv = document.getElementById('batch-filters'); // Added
+        const batchSummaryDiv = document.getElementById('batch-summary'); // Added
+        const batchActionsDiv = document.getElementById('batch-actions'); // Added
+        const batchTableContainer = document.getElementById('batch-table-container'); // Added
+
+        // Logs
+        const logTab = document.querySelector('[data-tab="logs"]');
+        const logView = document.getElementById('log-view');
+        const refreshLogsBtn = document.getElementById('refresh-logs');
+        const clearLogsBtn = document.getElementById('clear-logs');
+        const logMessage = document.getElementById('log-message');
+
+        // --- Global State ---
+        let currentSingleData = [];
+        let currentBatchData = { successItems: [], errorMessages: {} };
+        let batchTableRendered = false; // Флаг, показывающий, отрендерена ли таблица батча
+
+        // --- Utility Functions ---
+        function showMessage(element, type, text) { if(element){ element.className=`message ${type}`; element.textContent=text; element.style.display='block'; } else { console.error("Attempted to show message on null element"); } }
+        function hideMessage(element) { if(element){ element.style.display='none'; element.textContent=''; element.className='message'; } }
+        function updateProgress(percentage, text, statusClass = '') { if(progressContainer && progressBar){ progressContainer.style.display='block'; const p=Math.max(0,Math.min(100,percentage)); progressBar.style.width=`${p}%`; progressBar.textContent=text; progressBar.className=`progress ${statusClass}`; } }
+        function hideProgress() { if(progressContainer){ progressContainer.style.display='none'; updateProgress(0,'0%'); } }
+        function setControlsDisabled(disabled) {
+            const elements = [trackSingleBtn, trackBatchBtn, refreshLogsBtn, clearLogsBtn, downloadSingleCsvBtn, loginInput, passwordInput, singleBarcode, batchFile, batchCodes, clearFileBtn];
+            elements.forEach(el => { if (el) el.disabled = disabled; });
+            const batchDlBtn = document.getElementById('download-batch-csv');
+            if (batchDlBtn) batchDlBtn.disabled = disabled;
+            const showBatchBtn = document.getElementById('show-batch-results-btn'); // Also disable show button
+             if (showBatchBtn) showBatchBtn.disabled = disabled;
+        }
+        function uiLog(type, message, data) { console.log(`[UI-${type.toUpperCase()}] ${message}`, data !== undefined ? data : ''); }
+
+        // --- Rendering Functions ---
+        function createFilterControls(operationTypes, filterContainerId, tableSelector) {
+            const container = document.getElementById(filterContainerId);
+            if (!container) return;
+
+            let filterHtml = '<div class="filter-controls"><strong>Фильтр операций:</strong> ';
+            filterHtml += `<label><input type="checkbox" class="filter-op-type" value="all" checked> Все</label> `;
+
+            const groups = { /* ... группы операций ... */ };
+            const groupedOps = {}; const otherOps = []; const addedCodes = new Set();
+
+            for (const code in operationTypes) { /* ... логика группировки ... */ }
+            if(otherOps.length > 0) groupedOps['Прочее'] = otherOps;
+
+            for (const groupName in groupedOps) {
+                 const groupCodes = groupedOps[groupName].map(op => op.code).join(',');
+                 filterHtml += `<label><input type="checkbox" class="filter-op-type" value="${groupCodes}"> ${groupName}</label> `;
+            }
+            filterHtml += '</div>';
+            container.innerHTML = filterHtml;
+
+            container.querySelectorAll('.filter-op-type').forEach(checkbox => {
+                checkbox.addEventListener('change', (event) => {
+                    applyFilters(filterContainerId, tableSelector);
+                });
+            });
+        }
+
+        function applyFilters(filterContainerId, tableSelector) {
+            const container = document.getElementById(filterContainerId);
+            const table = document.querySelector(tableSelector);
+            if (!container || !table) return;
+
+            const allCheckbox = container.querySelector('.filter-op-type[value="all"]');
+            const typeCheckboxes = container.querySelectorAll('.filter-op-type:not([value="all"])');
+            const selectedCodes = new Set();
+            let showAll = false;
+
+            if (event && event.target === allCheckbox) {
+                if (allCheckbox.checked) { typeCheckboxes.forEach(cb => cb.checked = false); showAll = true; }
+                else { showAll = false; }
+            } else {
+                if (Array.from(typeCheckboxes).some(cb => cb.checked)) { allCheckbox.checked = false; showAll = false; }
+                else { allCheckbox.checked = true; showAll = true; }
+            }
+
+            if (!showAll) { typeCheckboxes.forEach(cb => { if (cb.checked) { cb.value.split(',').forEach(code => selectedCodes.add(code)); } }); }
+
+            const rows = table.querySelectorAll('tbody tr');
+            rows.forEach(row => {
+                const opCode = row.dataset.operationType;
+                if (showAll || !opCode || selectedCodes.has(opCode)) { // Показываем строки без opCode если не фильтруем
+                    row.classList.remove('hidden-operation');
+                } else {
+                    row.classList.add('hidden-operation');
+                }
+            });
+        }
+
+        function renderSingleResult(dataArray, resultDivElement, dataDivElement, filterContainerId = 'single-filters') {
+            // ... (Логика рендеринга деталей и таблицы ИСТОРИИ без изменений) ...
+             if (!resultDivElement || !dataDivElement) return;
+            dataDivElement.innerHTML = '';
+            resultDivElement.style.display = 'none';
+            document.getElementById(filterContainerId).innerHTML = ''; // Очищаем фильтры
+
+            if (!dataArray || dataArray.length === 0) {
+                dataDivElement.innerHTML = '<p class="no-data">Данные не найдены или не удалось получить.</p>';
+                resultDivElement.style.display = 'block';
+                return;
+            }
+
+            const firstRecord = dataArray[0];
+            const itemInfo = firstRecord.ItemParameters || {};
+            const financeInfo = firstRecord.FinanceParameters || {};
+            const userInfo = firstRecord.UserParameters || {};
+            const addressInfo = firstRecord.AddressParameters || {};
+
+            let detailsHtml = `
+                <section class="item-details card">
+                    <h3>Детали отправления</h3>
+                    <div class="details-columns">
+                        <dl>
+                            <dt>Тип:</dt><dd>${itemInfo.MailType?.Name || '-'} (${itemInfo.MailType?.Id || 'N/A'})</dd>
+                            <dt>Категория:</dt><dd>${itemInfo.MailCtg?.Name || '-'} (${itemInfo.MailCtg?.Id || 'N/A'})</dd>
+                            <dt>Разряд:</dt><dd>${itemInfo.MailRank?.Name || '-'} (${itemInfo.MailRank?.Id || 'N/A'})</dd>
+                            <dt>Отметки:</dt><dd>${(itemInfo.PostMarkNamesList || ['-']).join(', ')}</dd>
+                            <dt>Вес:</dt><dd>${itemInfo.Mass ? itemInfo.Mass + ' г' : '-'}</dd>
+                            <dt>Описание:</dt><dd>${itemInfo.ComplexItemName || '-'}</dd>
+                            <dt>Внутр. пересылка:</dt><dd>${itemInfo.ValidRuType ? 'Да' : 'Нет'}</dd>
+                            <dt>Междунар. пересылка:</dt><dd>${itemInfo.ValidEnType ? 'Да' : 'Нет'}</dd>
+                            <dt>Макс. вес (внутр.):</dt><dd>${itemInfo.MaxMassRu ? itemInfo.MaxMassRu + ' г' : '-'}</dd>
+                            <dt>Макс. вес (междунар.):</dt><dd>${itemInfo.MaxMassEn ? itemInfo.MaxMassEn + ' г' : '-'}</dd>
+                            <dt>Internum:</dt><dd>${itemInfo.Internum || '-'}</dd>
+                        </dl>
+                        <dl>
+                            <dt>Объявл. ценность:</dt><dd>${financeInfo.ValueFormatted || '-'}</dd>
+                            <dt>Наложенный платеж:</dt><dd>${financeInfo.PaymentFormatted || '-'}</dd>
+                            <dt>Плата за пересылку:</dt><dd>${financeInfo.MassRateFormatted || '-'}</dd>
+                            <dt>Плата за ОЦ:</dt><dd>${financeInfo.InsrRateFormatted || '-'}</dd>
+                            <dt>Плата за авиапересылку:</dt><dd>${financeInfo.AirRateFormatted || '-'}</dd>
+                            <dt>Доп. сбор:</dt><dd>${financeInfo.RateFormatted || '-'}</dd>
+                            <dt>Таможенный платеж:</dt><dd>${financeInfo.CustomDutyFormatted || '-'}</dd>
+                        </dl>
+                         <dl>
+                            <dt>Отправитель:</dt><dd>${userInfo.Sndr || '-'}</dd>
+                            <dt>Категория отправителя:</dt><dd>${userInfo.SendCtg?.Name || '-'} (${userInfo.SendCtg?.Id || 'N/A'})</dd>
+                            <dt>Получатель:</dt><dd>${userInfo.Rcpn || '-'}</dd>
+                        </dl>
+                        <dl>
+                            <dt>Адрес назначения:</dt><dd>${addressInfo.DestinationAddress?.Description || '-'} (${addressInfo.DestinationAddress?.Index || '-'})</dd>
+                            <dt>Страна назначения:</dt><dd>${addressInfo.MailDirect?.NameRU || '-'} (${addressInfo.MailDirect?.Code2A || '-'})</dd>
+                            <dt>Страна отправления:</dt><dd>${addressInfo.CountryFrom?.NameRU || '-'} (${addressInfo.CountryFrom?.Code2A || '-'})</dd>
+                        </dl>
+                    </div>
+                </section>
+                <h2>История операций</h2>`;
+
+            detailsHtml += `<table class="tracking-table sortable" id="single-history-table">
+                <thead>
+                    <tr>
+                        <th data-sort-method='none'>Дата и время</th>
+                        <th>Операция</th>
+                        <th>Атрибут</th>
+                        <th>Место проведения</th>
+                        <th data-sort-method='number'>Индекс</th>
+                        <th>Страна</th>
+                        <th>Статус</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+
+            const uniqueOperationTypes = {};
+            const sortedHistory = [...dataArray].sort((a, b) => Date.parse(b.OperationParameters?.OperDate || 0) - Date.parse(a.OperationParameters?.OperDate || 0));
+
+            sortedHistory.forEach(histRecord => {
+                 const opParams = histRecord.OperationParameters || {};
+                 const addrParams = histRecord.AddressParameters || {};
+                 const opTypeId = opParams.OperType?.Id;
+                 const opTypeName = opParams.OperType?.Name;
+                 if (opTypeId !== undefined && opTypeName && !opTypeName.startsWith('Неизвестная')) {
+                     uniqueOperationTypes[opTypeId] = { name: opTypeName };
+                 }
+
+                 const opDate = opParams.OperDate || '';
+                 const dateTime = opDate.split('T');
+                 const datePart = dateTime[0] || '';
+                 const timePart = (dateTime[1] || '').substring(0, 8);
+                 detailsHtml += `
+                    <tr data-operation-type="${opTypeId || ''}">
+                        <td>${datePart} ${timePart}</td>
+                        <td>${opTypeName || 'N/A'}</td>
+                        <td>${opParams.OperAttr?.Name || '-'}</td>
+                        <td>${addrParams.OperationAddress?.Description || 'N/A'}</td>
+                        <td>${addrParams.OperationAddress?.Index || ''}</td>
+                        <td>${addrParams.CountryOper?.NameRU || '-'}</td>
+                        <td class="${opParams.IsFinal ? 'final-status' : ''}">${opParams.IsFinal ? 'Да' : 'Нет'}</td>
+                    </tr>`;
+            });
+            detailsHtml += `</tbody></table>`;
+
+            dataDivElement.innerHTML = detailsHtml;
+            resultDivElement.style.display = 'block';
+
+            createFilterControls(uniqueOperationTypes, filterContainerId, `#${resultDivElement.id} #single-history-table`);
+            const newTable = dataDivElement.querySelector('table.sortable');
+            if (newTable && typeof Tablesort === 'function') { try { new Tablesort(newTable); } catch(e){ console.error("Failed to init sort on single result table:", e); } }
+            else if (!newTable) { console.warn("Sortable table not found in single result."); }
+            else { console.warn("Tablesort library not loaded."); }
+        }
+
+        // ** ИЗМЕНЕНО: renderBatchResult - рендерит только кнопки и ошибки по умолчанию **
+        function renderBatchResult(batchData, resultDivElement, summaryDivElement, actionsDivElement, filterContainerId, tableContainerElement, dataDivElement) {
+            if (!resultDivElement || !summaryDivElement || !actionsDivElement || !filterContainerId || !tableContainerElement || !dataDivElement) return;
+
+            // Очищаем все контейнеры
+            summaryDivElement.innerHTML = '';
+            actionsDivElement.innerHTML = '';
+            document.getElementById(filterContainerId).innerHTML = '';
+            dataDivElement.innerHTML = '';
+            tableContainerElement.style.display = 'none'; // Скрываем контейнер таблицы
+            resultDivElement.style.display = 'none'; // Скрываем весь блок результатов
+            batchTableRendered = false; // Сбрасываем флаг рендеринга таблицы
+
+            const successItems = batchData?.successItems || [];
+            const errorMessages = batchData?.errorMessages || {};
+            const errorCount = Object.keys(errorMessages).length;
+            const successCount = successItems.length;
+
+            let summaryHtml = `<h3>Результаты пакетного отслеживания (${successCount} успешно, ${errorCount} с ошибками)</h3>`;
+            let actionsHtml = '';
+
+            if (successCount === 0 && errorCount === 0) {
+                summaryHtml += '<p class="no-data">Нет данных для отображения.</p>';
+            } else {
+                 // Кнопка Скачать CSV (всегда показываем, если есть хоть какие-то данные)
+                 actionsHtml += `<button id="download-batch-csv" class="download-btn">Скачать CSV</button>`;
+                 // Кнопка Показать Результаты (только если есть успешные)
+                 if (successCount > 0) {
+                     actionsHtml += `<button id="show-batch-results-btn" class="button secondary">Показать результаты</button>`;
+                 }
+                 // Отображаем ошибки сразу
+                 if (errorCount > 0) {
+                    summaryHtml += `<h4 style="margin-top: 20px; color: #dc3545;">Ошибки обработки (${errorCount}):</h4>`;
+                    summaryHtml += `<ul class="error-list">`;
+                    for (const barcode in errorMessages) {
+                        summaryHtml += `<li><strong>${barcode}:</strong> ${errorMessages[barcode]}</li>`;
+                    }
+                    summaryHtml += `</ul>`;
+                }
+            }
+
+            summaryDivElement.innerHTML = summaryHtml;
+            actionsDivElement.innerHTML = actionsHtml; // Вставляем кнопки
+            resultDivElement.style.display = 'block'; // Показываем блок результатов (с кнопками и ошибками)
+
+            // Добавляем обработчики для новых кнопок
+            const newDownloadBtn = actionsDivElement.querySelector('#download-batch-csv');
+            if (newDownloadBtn) {
+                newDownloadBtn.addEventListener('click', () => { generateBatchCsv(currentBatchData, 'batch_tracking'); });
+            }
+            const showResultsBtn = actionsDivElement.querySelector('#show-batch-results-btn');
+            if (showResultsBtn) {
+                showResultsBtn.addEventListener('click', () => {
+                    // Вызываем функцию рендеринга таблицы только по клику
+                    renderBatchTable(batchData, tableContainerElement, dataDivElement, filterContainerId);
+                    showResultsBtn.style.display = 'none'; // Скрываем кнопку "Показать" после рендеринга
+                });
+            }
+        }
+
+        // ** НОВОЕ: Функция для рендеринга ТОЛЬКО таблицы пакетных результатов **
+        function renderBatchTable(batchData, tableContainerElement, dataDivElement, filterContainerId) {
+             if (!tableContainerElement || !dataDivElement || batchTableRendered) return; // Не рендерим повторно
+
+             const successItems = batchData?.successItems || [];
+             if (successItems.length === 0) {
+                 dataDivElement.innerHTML = '<p class="no-data">Нет успешных результатов для отображения в таблице.</p>';
+                 tableContainerElement.style.display = 'block';
+                 batchTableRendered = true;
+                 return;
+             }
+
+             let tableHtml = '';
+             const uniqueOperationTypes = {};
+             successItems.forEach(item => {
+                 (item.Operation || []).forEach(op => {
+                      const opTypeId = op.OperTypeID;
+                      const opTypeName = op.OperNameEnriched;
+                      if (opTypeId !== undefined && opTypeName && !opTypeName.startsWith('Неизвестная')) {
+                          uniqueOperationTypes[opTypeId] = { name: opTypeName };
+                      }
+                 });
+             });
+             createFilterControls(uniqueOperationTypes, filterContainerId, `#${tableContainerElement.id} #batch-history-table`);
+
+             tableHtml += `<table class="tracking-table sortable" id="batch-history-table">
+                         <thead>
+                             <tr>
+                                 <th>Трек-номер</th>
+                                 <th data-sort-method='none'>Дата операции</th>
+                                 <th>Операция</th>
+                                 <th>Атрибут</th>
+                                 <th data-sort-method='number'>Индекс</th>
+                                 <th>Статус</th>
+                             </tr>
+                         </thead>
+                         <tbody>`;
+             successItems.forEach(item => {
+                 const barcode = item.Barcode || 'N/A';
+                 if (item.Operation && item.Operation.length > 0) {
+                     const sortedOps = [...item.Operation].sort((a, b) => Date.parse(b.DateOper || 0) - Date.parse(a.DateOper || 0));
+                     sortedOps.forEach(op => {
+                         const opDate = op.DateOper || '';
+                         const dateTime = opDate.split('T');
+                         const datePart = dateTime[0] || '';
+                         const timePart = (dateTime[1] || '').substring(0, 8);
+                         tableHtml += `
+                             <tr data-operation-type="${op.OperTypeID || ''}">
+                                 <td>${barcode}</td>
+                                 <td>${datePart} ${timePart}</td>
+                                 <td>${op.OperNameEnriched || 'N/A'}</td>
+                                 <td>${op.OperCtgNameEnriched || '-'}</td>
+                                 <td>${op.IndexOper || ''}</td>
+                                 <td class="${op.IsFinal ? 'final-status' : ''}">${op.IsFinal ? 'Да' : 'Нет'}</td>
+                             </tr>`;
+                     });
+                 } else {
+                      tableHtml += `<tr><td>${barcode}</td><td colspan="5" class="no-data">Нет операций</td></tr>`;
+                 }
+             });
+             tableHtml += `</tbody></table>`;
+
+             dataDivElement.innerHTML = tableHtml;
+             tableContainerElement.style.display = 'block'; // Показываем контейнер с таблицей
+             batchTableRendered = true; // Устанавливаем флаг
+
+             const newTable = dataDivElement.querySelector('table.sortable');
+             if (newTable && typeof Tablesort === 'function') { try { new Tablesort(newTable); } catch(e){ console.error("Failed to init sort on batch result table:", e); } }
+             else if (!newTable) { console.warn("Sortable table not found in batch result."); }
+             else { console.warn("Tablesort library not loaded."); }
+        }
+
+
+        // --- API Call Abstraction (без изменений) ---
+        async function apiCall(endpoint, options) { /* ... */ }
+
+        // --- CSV Generation (без изменений) ---
+        function generateBatchCsv(batchData, filenamePrefix = 'batch_tracking') { /* ... */ }
+        function generateSingleCsv(dataArray, filenamePrefix = 'single_tracking') { /* ... */ }
+
+        // --- Event Listeners ---
+        // ... (Tab Switching без изменений) ...
+        // ... (Single Tracking без изменений) ...
+
+        // Batch Tracking
+        trackBatchBtn.addEventListener('click', async () => {
+            const login = loginInput.value.trim(); const password = passwordInput.value.trim();
+            // Сбрасываем все перед новым запросом
+            hideMessage(batchMessage);
+            batchResultDiv.style.display='none'; // Скрываем весь блок результатов
+            batchInfoDiv.style.display='none';
+            batchDataDiv.innerHTML=''; // Очищаем данные таблицы
+            batchTableContainer.style.display = 'none'; // Скрываем контейнер таблицы
+            batchSummaryDiv.innerHTML = ''; // Очищаем саммари
+            batchActionsDiv.innerHTML = ''; // Очищаем кнопки действий
+            batchFiltersDiv.innerHTML = ''; // Очищаем фильтры
+            hideProgress();
+            currentBatchData={ successItems: [], errorMessages: {} };
+            batchTableRendered = false; // Сбрасываем флаг рендеринга
+
+            if (!login || !password) { showMessage(batchMessage, 'error', 'Логин и пароль обязательны.'); return; }
+            let barcodes = []; const fileInput = document.getElementById('batch-file'); const file = fileInput.files[0]; const codesFromText = batchCodes.value.split(/[\\r\\n]+/).map(s => s.trim()).filter(Boolean);
+            if (file) { try { const text = await file.text(); barcodes = text.split(/[\\r\\n]+/).map(s => s.trim()).filter(Boolean); batchInfoDiv.textContent = `Файл: ${file.name}`; batchInfoDiv.style.display='block'; } catch (e) { showMessage(batchMessage, 'error', `Ошибка чтения файла: ${e.message}`); return; } }
+            else if (codesFromText.length > 0) { barcodes = codesFromText; } else { showMessage(batchMessage, 'error', 'Загрузите файл или введите трек-номера.'); return; }
+            if (barcodes.length === 0) { showMessage(batchMessage, 'error', 'Трек-номера не найдены.'); return; }
+
+            showMessage(batchMessage, 'info', `Начало обработки ${barcodes.length} треков...`); setControlsDisabled(true);
+            updateProgress(5, `1/2: Запрос тикета...`, 'processing');
+            let ticket = null; let batchResultData = null;
+
+            try {
+                // Stage 1: Get Ticket
+                const ticketResult = await apiCall('/track/batch/ticket', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login, password, barcodes }) });
+                if (!ticketResult.success || !ticketResult.ticket) { throw new Error(ticketResult.error || 'Не удалось получить тикет от сервера.'); }
+                ticket = ticketResult.ticket;
+                batchInfoDiv.textContent = `Тикет: ${ticket}. Ожидание результата...`; batchInfoDiv.style.display='block';
+                updateProgress(25, `2/2: Ожидание результата ${ticket}... (1/${MAX_POLLING_ATTEMPTS})`, 'processing');
+
+                // Stage 2: Poll for Batch Result
+                let attempts = 0;
+                while (batchResultData === null && attempts < MAX_POLLING_ATTEMPTS) {
+                    attempts++; if (attempts > 1) { await new Promise(r => setTimeout(r, POLLING_INTERVAL_MS)); }
+                    uiLog('info', `Poll attempt ${attempts} for ticket ${ticket}`);
+                    if (!ticket) { throw new Error('Внутренняя ошибка: Потерян номер тикета перед опросом результата.'); }
+                    try {
+                        const resultResponse = await apiCall('/track/batch/result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login, password, ticket }) });
+                        if (resultResponse.success) {
+                            batchResultData = resultResponse.data;
+                            const s = (batchResultData.successItems || []).length;
+                            const e = Object.keys(batchResultData.errorMessages || {}).length;
+                            updateProgress(100, `Готово (Успех:${s}, Ошибки:${e})`, e > 0 ? 'warn' : 'success');
+                        } else if (resultResponse.status === 'PROCESSING') {
+                            const p = 25 + Math.round((attempts / MAX_POLLING_ATTEMPTS) * 70);
+                            updateProgress(p, `2/2: Ожидание результата ${ticket}... (${attempts}/${MAX_POLLING_ATTEMPTS})`, 'processing');
+                        } else { throw new Error(resultResponse.error || 'Неизвестный ответ статуса.'); }
+                    } catch (pollError) {
+                        if ((pollError instanceof Error && (pollError.message.includes('PROCESSING') || pollError.message.includes('not ready'))) && attempts < MAX_POLLING_ATTEMPTS) {
+                            const p = 25 + Math.round((attempts / MAX_POLLING_ATTEMPTS) * 70);
+                            updateProgress(p, `2/2: Ожидание результата ${ticket}... (${attempts}/${MAX_POLLING_ATTEMPTS})`, 'processing');
+                            uiLog('info', `Poll ${attempts}: PROCESSING.`);
+                        } else { throw pollError; }
+                    }
+                }
+                if (batchResultData === null) { throw new Error(`Результат для тикета ${ticket} не получен после ${MAX_POLLING_ATTEMPTS} попыток.`); }
+
+                // Stage 3: Render Summary and Buttons (Table rendering deferred)
+                hideMessage(batchMessage);
+                batchInfoDiv.textContent = `Обработка тикета ${ticket} завершена.`;
+                // ** ВЫЗЫВАЕМ renderBatchResult, который покажет только кнопки и ошибки **
+                renderBatchResult(batchResultData, batchResultDiv, batchSummaryDiv, batchActionsDiv, 'batch-filters', batchTableContainer, batchDataDiv);
+                currentBatchData = batchResultData;
+
+                const sCount = (batchResultData.successItems || []).length;
+                const errCount = Object.keys(batchResultData.errorMessages || {}).length;
+                if (sCount > 0 && errCount === 0) { showMessage(batchMessage, 'success', `Пакетная обработка успешно завершена для ${sCount} треков. Результаты готовы к выгрузке.`); }
+                else if (sCount > 0) { showMessage(batchMessage, 'warn', `Обработка завершена. Успешно: ${sCount}, Ошибки: ${errCount}. Результаты готовы к выгрузке.`); }
+                else { showMessage(batchMessage, 'error', `Обработка завершена без успешных результатов. Ошибки: ${errCount}.`); }
+
+            } catch (error) {
+                 updateProgress(100, 'Ошибка', 'error'); showMessage(batchMessage, 'error', `Ошибка: ${error.message}`); batchInfoDiv.style.display='none'; batchResultDiv.style.display='none';
+            } finally { setControlsDisabled(false); }
+        });
+        // Listener for batch download button is added dynamically in renderBatchResult
+
+        // Clear File Button Listener
+        if (clearFileBtn) {
+            clearFileBtn.addEventListener('click', () => {
+                if (batchFile) {
+                    batchFile.value = ''; // Reset file input
+                    uiLog('info', 'File input cleared.');
+                }
+            });
+        } else { console.error("Clear file button not found!"); }
+
+        // --- Logging Tab Logic (без изменений) ---
+        // ...
+
+        // --- Initial Setup (без изменений) ---
+        // ...
+
+    </script>
+</body>
+</html>
