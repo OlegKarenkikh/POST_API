@@ -39,6 +39,24 @@ Key settings are stored in `config.js` and may be overridden with environment va
 - `POCHTA_SINGLE_URL` / `POCHTA_BATCH_URL` – endpoints for single and batch SOAP requests.
 - `API_TIMEOUT_MS` – request timeout in milliseconds.
 
+## Local Emulator
+For offline testing without real Russian Post credentials, a simple SOAP emulator is provided.
+
+```bash
+cd tracknew
+npm install
+npm run emulator
+```
+
+Then point the API client to the emulator endpoints:
+
+```bash
+export POCHTA_SINGLE_URL=http://localhost:8080/rtm34
+export POCHTA_BATCH_URL=http://localhost:8080/fc
+```
+
+The emulator returns canned responses and skips authentication.
+
 ## Testing
 The project does not ship with automated tests. Running `npm test` prints an error message. To manage tests, add test files and update the `test` script in `package.json` (for example, using `mocha` or Node's built-in `assert`).
 
